@@ -22,6 +22,9 @@
 - ✅ **SSH 端口自动探测**：`sshd -T` → `sshd_config` → 实际监听 socket，三级兜底
 - ✅ **防火墙自动选择**：nftables ⇄ iptables（含 firewalld 冲突提示）
 - ✅ **初始化系统适配**：systemd ⇄ OpenRC ⇄ SysV service
+- ✅ **运行前交互式询问**：可现场修改 SSH 端口、最大失败次数、封禁时长、统计窗口
+  - 改端口会**自动备份** `sshd_config` 并做 `sshd -t` 校验，失败自动回滚
+  - **绝不会自动重启 sshd**（避免把自己关在门外），只提示你新开终端验证
 - ✅ **防自锁**：自动把当前 SSH 登录来源 IP 加入白名单
 - ✅ **幂等 + 安全**：写配置前自动备份，`fail2ban-client -t` 校验失败则**回滚**
 - ✅ **部署后自检**：封禁 RFC5737 保留地址 `203.0.113.77` 后全防火墙搜索确认，再自动解封
@@ -63,6 +66,32 @@ sudo bash fail2ban-setup.sh --backend file
 sudo bash fail2ban-setup.sh --action iptables
 ```
 
+### 交互式询问
+
+不加参数直接运行会进入交互模式，依次询问（**直接回车 = 保持默认值**）：
+
+```
+---- 参数确认 (直接回车 = 使用括号内默认值) ----
+  > 新的 SSH 端口 (直接回车保持 20225):
+  > 最大失败次数 [2-10] (默认 6):
+  > 封禁时长[小时] (默认 8760h ≈ 365 天):
+  > 统计窗口[秒] (默认 21600s ≈ 6 小时):
+--------------------------------------------------
+```
+
+> ⚠️ **修改 SSH 端口有风险**：脚本会备份 `sshd_config` 并用 `sshd -t` 校验，
+> 但**不会自动重启 sshd**。请务必**先新开一个终端**用新端口测试能连上，再断开当前连接。
+
+若要跳过询问（例如用于自动化）：
+
+```bash
+bash fail2ban-setup.sh -y     # 全部采用默认值
+bash fail2ban-setup.sh -n     # 完全非交互，纯命令行模式
+```
+
+注意：`curl URL | bash` 这类管道方式下 stdin 不是终端，脚本会**自动跳过询问**，
+此时请用 `-p/-r/-f/-b` 显式传参。
+
 ### 关于 `bash https://...`
 
 **不能**写成 `bash https://raw.githubusercontent.com/...` —— bash 只接受本地文件路径，会直接报：
@@ -87,6 +116,8 @@ bash: https://...: No such file or directory
 | `--backend TYPE` | 强制后端 `systemd`\|`file` | 自动 |
 | `--action TYPE` | 强制 `nftables`\|`iptables` | 自动 |
 | `--no-test` | 跳过封禁链路自检 | 否 |
+| `-y, --yes` | 交互式询问全部采用默认值 | 否 |
+| `-n, --no-interactive` | 完全跳过所有询问 | 否 |
 | `-h, --help` | 帮助 | |
 | `-v, --version` | 版本 | |
 
