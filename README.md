@@ -28,19 +28,52 @@
 
 ## 用法
 
+### 一行免下载（推荐）
+
 ```bash
-# 全自动（推荐）
+bash <(curl -fsSL https://raw.githubusercontent.com/tangddftyy041/fail2ban-setup/main/fail2ban-setup.sh)
+```
+
+带参数：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/tangddftyy041/fail2ban-setup/main/fail2ban-setup.sh) -p 20225 -r 6
+```
+
+### 先下载再执行
+
+```bash
+wget https://raw.githubusercontent.com/tangddftyy041/fail2ban-setup/main/fail2ban-setup.sh
 bash fail2ban-setup.sh
+```
 
-# 指定端口与阈值
+带参数：
+
+```bash
 sudo bash fail2ban-setup.sh -p 20225 -r 6 -f 21600 -b 8760
+```
 
+### 其它用法
+
+```bash
 # 强制使用文件日志后端
 sudo bash fail2ban-setup.sh --backend file
 
 # 强制使用 iptables
 sudo bash fail2ban-setup.sh --action iptables
 ```
+
+### 关于 `bash https://...`
+
+**不能**写成 `bash https://raw.githubusercontent.com/...` —— bash 只接受本地文件路径，会直接报：
+
+```
+bash: https://...: No such file or directory
+```
+
+要用上面的一行式 `bash <(curl -fsSL URL)`（进程替换，需 bash，不能用 sh）。
+
+管道式 `curl -fsSL URL | bash` 也能跑，但**传参必须写成** `bash -s -- -p 20225`，且脚本占用 stdin，不如 `<(...)` 方便。
 
 ### 参数
 
