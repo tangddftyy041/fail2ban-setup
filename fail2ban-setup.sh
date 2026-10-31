@@ -32,7 +32,7 @@ warn(){ printf "${C_Y}[WARN]${C_R} %s\n" "$*" >&2; }
 die(){  printf "${C_E}[FAIL]${C_R} %s\n" "$*" >&2; exit 1; }
 
 # ---------------------------- 默认参数 ----------------------------
-PORT=""; MAXRETRY=6; FINDTIME=21600
+PORT=""; MAXRETRY=3; FINDTIME=21600
 BANTIME_HOURS=8760; PERMANENT=1        # PERMANENT=1 -> bantime=-1(永久); 传 -b 则转为按时长封禁
 PORT_MANUAL=0                             # 用户是否用 -p 显式指定了端口
 EXTRA_IGNORE=""; FORCE_BACKEND=""; FORCE_ACTION=""; SKIP_TEST=0
@@ -42,7 +42,7 @@ usage(){ cat <<'USAGE'
 用法: bash fail2ban-setup.sh [选项]
 
   -p, --port PORT      SSH 端口 (默认自动探测实际监听端口)
-  -r, --maxretry N     失败几次后封禁 (默认 6)
+  -r, --maxretry N     失败几次后封禁 (默认 3)
   -f, --findtime SEC   统计窗口秒数 (默认 21600=6小时, 可防慢速爆破)
   -b, --bantime HOURS  封禁时长小时 (默认: 永久封禁 bantime=-1)
       --permanent      强制永久封禁 (与 -b 同时给时以此为准)

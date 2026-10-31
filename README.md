@@ -122,7 +122,7 @@ bash: https://...: No such file or directory
 | 参数 | 说明 | 默认 |
 |---|---|---|
 | `-p, --port PORT` | SSH 端口 | 自动探测 |
-| `-r, --maxretry N` | 失败几次后封禁 | `6` |
+| `-r, --maxretry N` | 失败几次后封禁 | `3` |
 | `-f, --findtime SEC` | 统计窗口秒数 | `21600`（6 小时，可防慢速爆破） |
 | `-b, --bantime HOURS` | 封禁时长（小时） | **永久**（`bantime = -1`） |
 | `--permanent` | 强制永久封禁（与 `-b` 同时给时以此为准） | 是 |
