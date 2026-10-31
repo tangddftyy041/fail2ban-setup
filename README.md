@@ -10,6 +10,12 @@
 |---|---|
 | 写死 `logpath = /var/log/auth.log` | Debian 12 / RHEL 9 默认只有 journald，**该文件根本不存在** → 读不到任何日志 → 永不封禁 |
 | 写死 `action = ... port=ssh` | `ssh` 在 `/etc/services` 里 = **22**，而你的 SSH 可能监听 20225 → 封错端口 |
+
+> 补充一个**很容易踩的坑**：只写 `port = 20225` 是**不够的**。
+> fail2ban 的 `action` 参数**不会**自动继承 jail 段里的 `port`；
+> 若写成裸 `action = nftables-multiport`，它会用 action 自带的默认端口，
+> 最终仍退化成 `ssh`（=22），封禁规则封错端口、形同虚设。
+> 本脚本因此显式写成 `nftables-multiport[port="20225", protocol="tcp"]`。
 | 只支持老发行版 + `service` 命令 | 无法适配 systemd / nftables |
 
 本脚本针对以上三点做了**自动探测**，并内置**部署后自检**（真的封一个保留测试 IP 再解封），确保装完确实生效。

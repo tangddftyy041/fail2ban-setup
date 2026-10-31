@@ -313,6 +313,8 @@ merge_ip_list(){
 # ---------------------------- 7. 写入 jail 配置 ----------------------------
 write_jail(){
   local port="$1" backend="$2" action="$3" unit="$4" ignore="$5"
+  # 合并后的白名单写回全局变量，供结尾摘要显示真实生效值
+  # (IGNORE 是 build_ignoreip 的原始值，不含 write_jail 内继承合并的 IP)
   # 永久封禁: bantime = -1。fail2ban 内部对 -1 有专门处理:
   #   ticket.py   -> isTimedOut() 恒为 False(永不到期)
   #   database.py -> bantime != -1 才清理(永久条目不会被 dbpurgeage 清掉)
@@ -379,6 +381,10 @@ write_jail(){
     echo "findtime  = $FINDTIME"
     echo "maxretry  = $MAXRETRY"
     echo "banaction = $action"
+    # 注意: action 的 port 不会自动继承 [sshd] 段的 port。
+    # 若写成裸 "action = nftables-multiport"，fail2ban 会用 action 自带的默认 port，
+    # 最终退化成 ssh(=22)，导致 SSH 跑在 20225 时封禁规则封错端口、形同虚设。
+    # 必须显式传入 port="..."。
     echo
     echo "[sshd]"
     echo "enabled   = true"
@@ -386,8 +392,8 @@ write_jail(){
     # ignoreip 同时写在本段: [sshd] 显式值优先于 [DEFAULT]，
     # 可防止被其它文件的 [sshd].ignoreip(含旧白名单)覆盖后丢失防自锁条目
     echo "ignoreip  = $ignore"
-    # 显式绑定 action，避免只写 banaction 时被其它配置段覆盖
-    echo "action    = $action"
+    # 显式绑定 action 并强制带上真实端口(见上方说明)
+    echo "action    = $action[port=\"$port\", protocol=\"tcp\"]"
     echo "mode      = aggressive"
     echo "port      = $port"
     echo "maxretry  = $MAXRETRY"
@@ -413,6 +419,7 @@ write_jail(){
     die "配置语法校验失败，已撤销写入"
   fi
   ok "配置已写入 $JAIL_FILE (语法校验通过)"
+  IGNORE="$ignore"   # 回传真实生效的白名单(含继承合并的部分)
 }
 
 # ---------------------------- 7.5 交互式询问 ----------------------------
@@ -520,7 +527,22 @@ verify_ban(){
     sleep 1
     if fw_has_ip "$TEST_IP"; then found=1; break; fi
   done
+  # 解封必须确认成功: 现在是永久封禁，解封失败会留下一个"永久"残留条目
   fail2ban-client set sshd unbanip "$TEST_IP" >/dev/null 2>&1
+  # 复核: 从 fail2ban 与防火墙两侧确认测试 IP 确实已消失
+  local still=1
+  for _i in 1 2 3 4 5; do
+    if fail2ban-client status sshd 2>/dev/null | tr ' ' '\n' | grep -Fxq "$TEST_IP"; then
+      sleep 1; continue
+    fi
+    if fw_has_ip "$TEST_IP"; then sleep 1; continue; fi
+    still=0; break
+  done
+  if [ "$still" = "1" ]; then
+    # 强制再解一次并告警 —— 永久封禁下残留条目不会自动过期
+    fail2ban-client set sshd unbanip "$TEST_IP" >/dev/null 2>&1
+    warn "自检解封未能确认，已重试一次；请手动执行: fail2ban-client set sshd unbanip $TEST_IP"
+  fi
   [ "$found" = "1" ]
 }
 
