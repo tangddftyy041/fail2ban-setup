@@ -14,12 +14,14 @@
 #           重启后由 fail2ban 数据库自动恢复，需手动解封。
 #
 # 用法     : bash fail2ban-setup.sh [选项]
-#            sudo bash fail2ban-setup.sh -p 20225 -r 6 -f 21600 -b 8760
+#            sudo bash fail2ban-setup.sh -p 20225 -r 3 -f 21600
 # ============================================================================
 set -uo pipefail
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 JAIL_DIR="${JAIL_D:-/etc/fail2ban/jail.d}"                 # 可用 JAIL_D 覆盖，仅用于测试
+CONF_DIR="$(dirname "$JAIL_DIR")"                             # fail2ban 配置根目录(供 -t 校验)
+JAIL_LOCAL="$CONF_DIR/jail.local"                             # 读取顺序: *.conf -> 本文件 -> *.local
 OWN_JAIL_FILE="$JAIL_DIR/zzz-sshd-auto.local"                # zzz- 保证在 *.local 中排最后
 JAIL_FILE=""                                                  # 实际落点(由 detect_existing_jail 决定)
 ADOPTED=0
@@ -31,12 +33,31 @@ ok(){   printf "${C_G}[ OK ]${C_R} %s\n" "$*"; }
 warn(){ printf "${C_Y}[WARN]${C_R} %s\n" "$*" >&2; }
 die(){  printf "${C_E}[FAIL]${C_R} %s\n" "$*" >&2; exit 1; }
 
+# 把本次改动过的所有文件恢复到修改前(备份由 cp -a 生成)
+rollback_all(){
+  local item bak orig n=0
+  # 条目格式 "备份文件|原文件"；备份为空表示原文件本不存在，直接删掉新生成的文件
+  for item in ${ROLLBACK_FILES[@]+"${ROLLBACK_FILES[@]}"}; do
+    bak="${item%%|*}"; orig="${item#*|}"
+    if [ -n "$bak" ]; then
+      if [ -f "$bak" ]; then mv -f "$bak" "$orig" && n=$((n+1)); fi
+    else
+      rm -f "$orig" && n=$((n+1))
+    fi
+  done
+  [ "$n" -gt 0 ] && info "已恢复 $n 个文件到修改前的状态"
+  return 0
+}
+
 # ---------------------------- 默认参数 ----------------------------
 PORT=""; MAXRETRY=3; FINDTIME=21600
 BANTIME_HOURS=8760; PERMANENT=1        # PERMANENT=1 -> bantime=-1(永久); 传 -b 则转为按时长封禁
 PORT_MANUAL=0                             # 用户是否用 -p 显式指定了端口
 EXTRA_IGNORE=""; FORCE_BACKEND=""; FORCE_ACTION=""; SKIP_TEST=0
 ASSUME_YES=0; NO_INTERACTIVE=0; CHANGE_SSHD_PORT=0
+STRICT_TEST=1                             # 自检失败是否以非零码退出
+PERMANENT_EXPLICIT=0                      # 是否显式指定 --permanent
+ROLLBACK_FILES=()                                           # 校验失败时用于整体回滚
 
 usage(){ cat <<'USAGE'
 用法: bash fail2ban-setup.sh [选项]
@@ -50,6 +71,7 @@ usage(){ cat <<'USAGE'
       --backend TYPE   强制后端: systemd | file
       --action TYPE    强制动作: nftables | iptables
       --no-test        跳过封禁链路自检
+      --no-fail-on-test 自检失败只告警、不返回非零退出码(兼容旧行为)
   -y, --yes           交互式询问全部采用默认值(非交互)
   -n, --no-interactive 完全跳过所有询问(纯命令行模式)
   -h, --help           显示本帮助
@@ -62,17 +84,27 @@ usage(){ cat <<'USAGE'
 USAGE
 }
 
+# 带值选项必须真的拿到值。旧版直接用 shift 2，缺值时 shift 失败但 $# 不变，
+# while 循环永远出不去(CPU 100%)；这里改为立即报错退出。
+need_value(){
+  local opt="$1" val="$2" remain="$3"
+  [ "$remain" -ge 2 ] || die "选项 $opt 缺少参数值（用法见 -h）"
+  [ -n "$val" ]       || die "选项 $opt 的参数值不能为空（用法见 -h）"
+  case "$val" in -*) die "选项 $opt 缺少参数值（'$val' 看起来是另一个选项，用法见 -h）";; esac
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    -p|--port)      PORT="${2:-}"; PORT_MANUAL=1; shift 2;;
-    -r|--maxretry)  MAXRETRY="${2:-}";    shift 2;;
-    -f|--findtime)  FINDTIME="${2:-}";    shift 2;;
-    -b|--bantime)   BANTIME_HOURS="${2:-}"; PERMANENT=0; shift 2;;
-    --permanent)    PERMANENT=1;           shift;;
-    -i|--ignoreip)  EXTRA_IGNORE="$EXTRA_IGNORE ${2:-}"; shift 2;;
-    --backend)      FORCE_BACKEND="${2:-}"; shift 2;;
-    --action)       FORCE_ACTION="${2:-}";  shift 2;;
+    -p|--port)      need_value "$1" "${2:-}" "$#"; PORT="$2"; PORT_MANUAL=1; shift 2;;
+    -r|--maxretry)  need_value "$1" "${2:-}" "$#"; MAXRETRY="$2"; shift 2;;
+    -f|--findtime)  need_value "$1" "${2:-}" "$#"; FINDTIME="$2"; shift 2;;
+    -b|--bantime)   need_value "$1" "${2:-}" "$#"; BANTIME_HOURS="$2"; PERMANENT=0; shift 2;;
+    --permanent)    PERMANENT=1; PERMANENT_EXPLICIT=1; shift;;
+    -i|--ignoreip)  need_value "$1" "${2:-}" "$#"; EXTRA_IGNORE="$EXTRA_IGNORE $2"; shift 2;;
+    --backend)      need_value "$1" "${2:-}" "$#"; FORCE_BACKEND="$2"; shift 2;;
+    --action)       need_value "$1" "${2:-}" "$#"; FORCE_ACTION="$2"; shift 2;;
     --no-test)      SKIP_TEST=1;          shift;;
+    --no-fail-on-test) STRICT_TEST=0;     shift;;
     -y|--yes)       ASSUME_YES=1;         shift;;
     -n|--no-interactive) NO_INTERACTIVE=1; shift;;
     -h|--help)      usage; exit 0;;
@@ -81,8 +113,55 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --permanent 无论与 -b 谁先谁后都生效(与 README 描述一致)
+[ "$PERMANENT_EXPLICIT" = "1" ] && PERMANENT=1
+
+# ---------------------------- 0.1 参数合法性校验 ----------------------------
+# 交互模式、-y、-n、管道方式全部适用；且放在 root 检查之前，参数错了就不往下走。
+is_uint(){ case "${1:-}" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
+
+validate_port(){
+  local plist="${1:-}" p
+  [ -n "$plist" ] || return 1
+  local IFS=','
+  # shellcheck disable=SC2086
+  for p in $plist; do
+    is_uint "$p" || return 1
+    [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || return 1
+  done
+  return 0
+}
+
+validate_params(){
+  local stage="$1"
+  is_uint "$MAXRETRY"  || die "$stage: maxretry 必须是正整数（当前 '$MAXRETRY'）"
+  [ "$MAXRETRY" -ge 1 ] || die "$stage: maxretry 必须 >= 1（当前 '$MAXRETRY'）"
+  is_uint "$FINDTIME"  || die "$stage: findtime 必须是正整数秒（当前 '$FINDTIME'）"
+  [ "$FINDTIME" -ge 1 ] || die "$stage: findtime 必须 >= 1（当前 '$FINDTIME'）"
+  is_uint "$BANTIME_HOURS" || die "$stage: bantime 小时数必须是整数（当前 '$BANTIME_HOURS'）"
+  if [ "$PERMANENT" = "0" ] && [ "$BANTIME_HOURS" -lt 1 ]; then
+    die "$stage: bantime 小时数必须 >= 1（当前 '$BANTIME_HOURS'）；为 0 等于不封禁"
+  fi
+  case "$FORCE_BACKEND" in ''|systemd|file) ;; *) die "$stage: --backend 只支持 systemd|file（当前 '$FORCE_BACKEND'）";; esac
+  case "$FORCE_ACTION"  in ''|nftables|iptables) ;; *) die "$stage: --action 只支持 nftables|iptables（当前 '$FORCE_ACTION'）";; esac
+  # 只允许 IP/CIDR 常见字符，防止换行或配置指令被注入 jail 文件
+  case "$EXTRA_IGNORE" in
+    *[!0-9A-Za-z:.,/\ _-]*) die "$stage: -i 白名单含非法字符（只允许 IP/CIDR，空格分隔）";;
+  esac
+  if [ "$stage" = "最终参数" ]; then
+    [ -n "$PORT" ] || die "$stage: 未能确定 SSH 端口，请用 -p 指定"
+  fi
+  if [ -n "$PORT" ] && ! validate_port "$PORT"; then
+    die "$stage: SSH 端口非法（当前 '$PORT'），需为 1-65535 或逗号分隔的端口列表"
+  fi
+}
+
+validate_params "命令行参数"
+
 # ---------------------------- 0. 前置检查 ----------------------------
-[ "$(id -u)" = "0" ] || die "需要 root 权限运行 (请先 sudo -i 或 sudo $0)"
+# F2B_LIB_ONLY=1 时只加载函数供单元测试 source，不要求 root、不执行主流程
+[ "${F2B_LIB_ONLY:-0}" = "1" ] || [ "$(id -u)" = "0" ] \
+  || die "需要 root 权限运行 (请先 sudo -i 或 sudo $0)"
 
 # ---------------------------- 1. 识别包管理器并安装 ----------------------------
 PKG=""
@@ -201,23 +280,35 @@ detect_logpath(){
 detect_existing_jail(){
   local f best=""
   [ -d "$JAIL_DIR" ] || { printf ''; return; }
-  # 严格按 fail2ban 的读取顺序遍历：*.conf 先(低优先级)，jail.local 居中，*.local 后(高优先级)
-  for f in $( { ls -1 "$JAIL_DIR"/*.conf 2>/dev/null; ls -1 /etc/fail2ban/jail.local 2>/dev/null; ls -1 "$JAIL_DIR"/*.local 2>/dev/null; } | sort -u); do
+  # 必须按 fail2ban 源码 client/configreader.py 的真实读取顺序:
+  #   jail.conf -> sorted(jail.d/*.conf) -> jail.local -> sorted(jail.d/*.local)
+  # 组间顺序固定、只在组内排序。不能把所有路径混在一起全局 sort ——
+  # "/etc/fail2ban/jail.local" 会排在 "/etc/fail2ban/jail.d/*.local" 之后，
+  # 被误判成优先级最高，接管它并把真正最后读的 *.local 清成 enabled=false，
+  # 最终 jail 被关掉而脚本仍报"部署完成"。
+  # 用进程替换而非管道，保证 while 里的赋值留在当前 shell。
+  while IFS= read -r f; do
     [ -f "$f" ] || continue
     grep -qE '^[[:space:]]*\[sshd\]' "$f" 2>/dev/null && best="$f"
-  done
+  done < <(
+    ls -1 "$JAIL_DIR"/*.conf 2>/dev/null | LC_ALL=C sort
+    [ -f "$JAIL_LOCAL" ] && printf '%s\n' "$JAIL_LOCAL"
+    ls -1 "$JAIL_DIR"/*.local 2>/dev/null | LC_ALL=C sort
+  )
   printf '%s' "$best"
 }
 
 # 把"其它"含 [sshd] 段的既有文件里的 sshd 段关掉，只保留我们接管的那一个
 neutralize_other_jails(){
-  local keep="$1" f
+  local keep="$1" f bak
   [ -d "$JAIL_DIR" ] || return 0
-  for f in "$JAIL_DIR"/*.conf "$JAIL_DIR"/*.local /etc/fail2ban/jail.local; do
+  for f in "$JAIL_DIR"/*.conf "$JAIL_DIR"/*.local "$JAIL_LOCAL"; do
     [ -f "$f" ] || continue
     [ "$f" = "$keep" ] && continue
     grep -qE '^[[:space:]]*\[sshd\]' "$f" 2>/dev/null || continue
-    cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null
+    bak="${f}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$f" "$bak" 2>/dev/null || { warn "备份 $f 失败，跳过禁用该文件"; continue; }
+    ROLLBACK_FILES+=("$bak|$f")
     # 彻底清空该 [sshd] 段内的所有键，只保留 enabled=false。
     # 只写 enabled=false 是不够的: 残留的 logpath/port/maxretry 等仍会被
     # fail2ban 合并进最终配置(后读覆盖先读)，可能盖掉我们接管文件里的正确值。
@@ -230,7 +321,7 @@ neutralize_other_jails(){
       { if (!insec) print }
     ' "$f" > "${f}.tmp.$$" 2>/dev/null \
       && mv "${f}.tmp.$$" "$f" \
-      && info "已禁用旧文件 [sshd] 段: $f (原文件已备份为 *.bak.*)"
+      && info "已禁用旧文件 [sshd] 段: $f (原文件已备份为 $bak)"
   done
   return 0
 }
@@ -342,7 +433,7 @@ write_jail(){
   # 继承: 把所有既有 sshd 文件里的用户自定义值合并进来(尤其是白名单，绝不能丢)
   if [ "$ADOPTED" = "1" ] || [ -d "$JAIL_DIR" ]; then
     local f inherited
-    for f in "$JAIL_DIR"/*.conf "$JAIL_DIR"/*.local /etc/fail2ban/jail.local; do
+    for f in "$JAIL_DIR"/*.conf "$JAIL_DIR"/*.local "$JAIL_LOCAL"; do
       [ -f "$f" ] || continue
       grep -qE '^[[:space:]]*\[sshd\]' "$f" 2>/dev/null || continue
       inherited="$(inherit_from_existing "$f" ignoreip)"
@@ -355,7 +446,7 @@ write_jail(){
         fi
       fi
       # 未显式指定端口时，也继承既有配置里的端口
-      if [ -z "$PORT_MANUAL" ]; then
+      if [ "$PORT_MANUAL" = "0" ]; then
         local p2; p2="$(inherit_from_existing "$f" port)"
         case "$p2" in
           ''|*[!0-9,]*) ;;
@@ -365,8 +456,14 @@ write_jail(){
     done
   fi
 
-  [ -f "$JAIL_FILE" ] && cp -a "$JAIL_FILE" "${JAIL_FILE}.bak.$(date +%Y%m%d-%H%M%S)" \
-    && info "已备份旧配置 -> ${JAIL_FILE}.bak.*"
+  local backup=""
+  if [ -f "$JAIL_FILE" ]; then
+    backup="${JAIL_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$JAIL_FILE" "$backup" 2>/dev/null \
+      && { ROLLBACK_FILES+=("$backup|$JAIL_FILE"); info "已备份旧配置 -> $backup"; }
+  else
+    ROLLBACK_FILES+=("|$JAIL_FILE")   # 原文件不存在：校验失败时只删除新生成的文件
+  fi
 
   # 防御性清理: 剔除变量中可能混入的控制字符(如 ANSI 转义)
   ignore="$(printf '%s' "$ignore" | tr -d '\033' | sed 's/\[[0-9;]*[A-Za-z]//g')"
@@ -393,7 +490,7 @@ write_jail(){
     # 可防止被其它文件的 [sshd].ignoreip(含旧白名单)覆盖后丢失防自锁条目
     echo "ignoreip  = $ignore"
     # 显式绑定 action 并强制带上真实端口(见上方说明)
-    echo "action    = $action[port=\"$port\", protocol=\"tcp\"]"
+    echo "action    = ${action}[port=\"$port\", protocol=\"tcp\"]"
     echo "mode      = aggressive"
     echo "port      = $port"
     echo "maxretry  = $MAXRETRY"
@@ -412,11 +509,14 @@ write_jail(){
     echo "enabled = false"
   } > "$JAIL_FILE"
 
-  # 语法校验，失败则回滚
-  if ! fail2ban-client -t >/dev/null 2>&1; then
-    rm -f "$JAIL_FILE"
-    fail2ban-client -t 2>&1 | tail -n 5
-    die "配置语法校验失败，已撤销写入"
+  # 语法校验: 用 -c 指向实际配置目录(JAIL_D 覆盖时也校验同一套配置)。
+  # 失败时先抓住错误信息，再整体回滚；旧版直接 rm -f 会把用户既有配置删掉。
+  if ! fail2ban-client -c "$CONF_DIR" -t >/dev/null 2>&1; then
+    local err
+    err="$(fail2ban-client -c "$CONF_DIR" -t 2>&1 | tail -n 8)"
+    rollback_all
+    printf '%s\n' "$err" >&2
+    die "配置语法校验失败，已恢复所有文件到修改前的状态"
   fi
   ok "配置已写入 $JAIL_FILE (语法校验通过)"
   IGNORE="$ignore"   # 回传真实生效的白名单(含继承合并的部分)
@@ -456,7 +556,8 @@ maybe_change_sshd_port(){
   [ -f /etc/ssh/sshd_config ] || { warn "未找到 /etc/ssh/sshd_config，跳过改端口"; return 0; }
 
   # 备份
-  local bak="/etc/ssh/sshd_config.bak.$(date +%Y%m%d-%H%M%S)"
+  local bak
+  bak="/etc/ssh/sshd_config.bak.$(date +%Y%m%d-%H%M%S)"
   cp -a /etc/ssh/sshd_config "$bak" || { warn "备份失败，跳过改端口"; return 0; }
   info "已备份 sshd_config -> $bak"
 
@@ -522,8 +623,8 @@ fw_has_ip(){
 verify_ban(){
   fail2ban-client set sshd banip "$TEST_IP" >/dev/null 2>&1 || return 1
   # 等待最多 10 秒让规则真正落地(服务刚重启时存在竞态)
-  local i found=0
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  local found=0
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 1
     if fw_has_ip "$TEST_IP"; then found=1; break; fi
   done
@@ -547,6 +648,9 @@ verify_ban(){
 }
 
 # ============================== 主流程 ==============================
+# F2B_LIB_ONLY=1: 仅加载上面的函数供单元测试，不碰系统
+if [ "${F2B_LIB_ONLY:-0}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
+
 printf '\n=== Fail2ban SSH 防护部署脚本 v%s ===\n\n' "$VERSION"
 
 install_fail2ban
@@ -584,10 +688,12 @@ if [ "$NO_INTERACTIVE" != "1" ] && [ -t 0 ]; then
   esac
 
   # 3) 封禁时长(小时) —— 默认永久
-  BT="$(ask "  > 封禁时长[小时] (默认 永久 ; 输入 p/-1/0 也是永久): " "p")"
+  bt_def="p"; bt_desc="默认 永久 ; 输入 p/-1/0 也是永久"
+  if [ "$PERMANENT" = "0" ]; then bt_def="$BANTIME_HOURS"; bt_desc="默认 ${BANTIME_HOURS} 小时"; fi
+  BT="$(ask "  > 封禁时长[小时] ($bt_desc): " "$bt_def")"
   case "$BT" in
     p|P|-1|0) PERMANENT=1; info "封禁方式: 永久 (bantime = -1)，需手动解封";;
-    ''|*[!0-9]*) warn "bantime '$BT' 非法，保持永久封禁"; PERMANENT=1;;
+    ''|*[!0-9]*) warn "bantime '$BT' 非法，保持原设置不变";;
     *)
       if [ "$BT" -ge 1 ] 2>/dev/null && [ "$BT" -le 876000 ] 2>/dev/null; then
         BANTIME_HOURS="$BT"; PERMANENT=0
@@ -610,6 +716,9 @@ if [ "$NO_INTERACTIVE" != "1" ] && [ -t 0 ]; then
 
   printf '%s\n' '--------------------------------------------------' '' >&2
 fi
+
+# 命令行 / 交互两条路径统一再校验一次，杜绝 -n / -y / 管道方式绕过校验
+validate_params "最终参数"
 
 if [ "$PERMANENT" = "1" ]; then
   ok "最终参数: 端口=$PORT  失败${MAXRETRY}次/${FINDTIME}s  封禁=永久"
@@ -640,9 +749,12 @@ start_service
 
 if [ "$SKIP_TEST" = "1" ]; then
   warn "已跳过封禁链路自检 (--no-test)"
-elif verify_ban "$ACTION"; then
+elif verify_ban; then
   ok "封禁链路自检通过 (测试 IP 已封禁并解封)"
 else
+  if [ "$STRICT_TEST" = "1" ]; then
+    die "封禁链路自检失败：防火墙中未找到测试 IP，防护可能未生效。请检查 fail2ban-client status sshd 与防火墙后端；确认只是环境限制可加 --no-fail-on-test"
+  fi
   warn "自检未能在防火墙链中找到测试 IP，请手动确认: fail2ban-client status sshd"
 fi
 

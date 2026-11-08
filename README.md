@@ -10,13 +10,13 @@
 |---|---|
 | 写死 `logpath = /var/log/auth.log` | Debian 12 / RHEL 9 默认只有 journald，**该文件根本不存在** → 读不到任何日志 → 永不封禁 |
 | 写死 `action = ... port=ssh` | `ssh` 在 `/etc/services` 里 = **22**，而你的 SSH 可能监听 20225 → 封错端口 |
+| 只支持老发行版 + `service` 命令 | 无法适配 systemd / nftables |
 
 > 补充一个**很容易踩的坑**：只写 `port = 20225` 是**不够的**。
 > fail2ban 的 `action` 参数**不会**自动继承 jail 段里的 `port`；
 > 若写成裸 `action = nftables-multiport`，它会用 action 自带的默认端口，
 > 最终仍退化成 `ssh`（=22），封禁规则封错端口、形同虚设。
 > 本脚本因此显式写成 `nftables-multiport[port="20225", protocol="tcp"]`。
-| 只支持老发行版 + `service` 命令 | 无法适配 systemd / nftables |
 
 本脚本针对以上三点做了**自动探测**，并内置**部署后自检**（真的封一个保留测试 IP 再解封），确保装完确实生效。
 
@@ -40,6 +40,11 @@
 - ✅ **自动接管既有配置**：发现已存在含 `[sshd]` 的配置文件时，直接改写优先级最高的那一个，
   并把其它同类文件的 `[sshd]` 段清空（只留 `enabled = false`），避免被"静默覆盖"
 - ✅ **部署后自检**：封禁 RFC5737 保留地址 `203.0.113.77` 后全防火墙搜索确认，再自动解封
+  - 自检失败默认**非零退出**（自动化部署不会再"假装成功"），旧行为可用 `--no-fail-on-test` 恢复
+- ✅ **严格按 fail2ban 真实读取顺序接管配置**：`jail.conf → jail.d/*.conf → jail.local → jail.d/*.local`
+  （组间顺序固定、组内排序），不会把 `jail.local` 误判成最高优先级而把真正生效的 `*.local` 关掉
+- ✅ **校验失败完整回滚**：`fail2ban-client -c <配置目录> -t` 失败时恢复所有被改动文件，
+  不再删除用户既有配置；新建文件则清理干净
 
 ## 用法
 
@@ -52,7 +57,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/tangddftyy041/fail2ban-setup
 带参数：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/tangddftyy041/fail2ban-setup/main/fail2ban-setup.sh) -p 20225 -r 6
+bash <(curl -fsSL https://raw.githubusercontent.com/tangddftyy041/fail2ban-setup/main/fail2ban-setup.sh) -p 20225 -r 3
 ```
 
 ### 先下载再执行
@@ -65,8 +70,8 @@ bash fail2ban-setup.sh
 带参数：
 
 ```bash
-sudo bash fail2ban-setup.sh -p 20225 -r 6 -f 21600          # 默认永久封禁
-sudo bash fail2ban-setup.sh -p 20225 -r 6 -f 21600 -b 8760 # 改为封 365 天
+sudo bash fail2ban-setup.sh -p 20225 -r 3 -f 21600          # 默认永久封禁
+sudo bash fail2ban-setup.sh -p 20225 -r 3 -f 21600 -b 8760 # 改为封 365 天
 ```
 
 ### 其它用法
@@ -86,7 +91,7 @@ sudo bash fail2ban-setup.sh --action iptables
 ```
 ---- 参数确认 (直接回车 = 使用括号内默认值) ----
   > 新的 SSH 端口 (直接回车保持 20225):
-  > 最大失败次数 [2-10] (默认 6):
+  > 最大失败次数 [2-10] (默认 3):
   > 封禁时长[小时] (默认 永久 ; 输入 p/-1/0 也是永久):
   > 统计窗口[秒] (默认 21600s ≈ 6 小时):
 --------------------------------------------------
@@ -125,15 +130,20 @@ bash: https://...: No such file or directory
 | `-r, --maxretry N` | 失败几次后封禁 | `3` |
 | `-f, --findtime SEC` | 统计窗口秒数 | `21600`（6 小时，可防慢速爆破） |
 | `-b, --bantime HOURS` | 封禁时长（小时） | **永久**（`bantime = -1`） |
-| `--permanent` | 强制永久封禁（与 `-b` 同时给时以此为准） | 是 |
+| `--permanent` | 强制永久封禁（无论与 `-b` 的先后顺序，都以永久为准） | 是 |
 | `-i, --ignoreip IP` | 额外白名单，可重复 | 无 |
 | `--backend TYPE` | 强制后端 `systemd`\|`file` | 自动 |
 | `--action TYPE` | 强制 `nftables`\|`iptables` | 自动 |
 | `--no-test` | 跳过封禁链路自检 | 否 |
+| `--no-fail-on-test` | 自检失败只告警、不返回非零退出码（兼容旧行为） | 否 |
 | `-y, --yes` | 交互式询问全部采用默认值 | 否 |
 | `-n, --no-interactive` | 完全跳过所有询问 | 否 |
 | `-h, --help` | 帮助 | |
 | `-v, --version` | 版本 | |
+
+所有数值参数在**运行前**统一校验（`-p` 端口 1-65535、`-r/-f/-b` 必须为合法正整数、
+`-b 0` 会被拒绝因为等于不封禁、`-i` 只允许 IP/CIDR 字符）；无论交互、`-y`、`-n`
+还是 `curl | bash` 管道方式都一样，参数错误会立即以非零码退出，不会留下半成品配置。
 
 ## 关于 findtime（慢速爆破）
 
@@ -197,4 +207,13 @@ jail.conf → jail.d/*.conf(字母序) → jail.local → jail.d/*.local(字母�
 
 ## 许可
 
-MIT
+[MIT](LICENSE)
+
+## 版本历史
+
+- **v1.4.0**：修复接管既有 jail 时的优先级误判（会把防护静默关掉）、选项缺值导致无限循环、
+  `-b`/`-r`/`-f` 非数字或 `-b 0` 导致 `bantime=0` 静默失效、`PORT_MANUAL` 死代码、
+  校验失败删除用户原配置、自检失败仍返回成功；参数校验覆盖所有运行方式；
+  新增 `--no-fail-on-test`、LICENSE 与 CI 回归测试。
+- **v1.3.0**：默认 `maxretry` 由 6 改为 3；修复 action 未显式传 `port` 导致封错端口；
+  自动接管既有 jail 配置、默认永久封禁、IPv6 防自锁。

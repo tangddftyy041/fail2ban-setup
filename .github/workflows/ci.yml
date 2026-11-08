@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装检查工具与 fail2ban
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck fail2ban
+
+      - name: bash -n
+        run: bash -n fail2ban-setup.sh
+
+      - name: shellcheck
+        run: shellcheck -S warning fail2ban-setup.sh
+
+      - name: 回归测试
+        run: bash tests/regression.sh
+
+      - name: 验证脚本版本与帮助
+        run: |
+          bash fail2ban-setup.sh --version
+          bash fail2ban-setup.sh --help
